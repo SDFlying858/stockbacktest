@@ -1,0 +1,347 @@
+from datetime import datetime
+import gc
+import backtrader as bt
+import backtrader.analyzers as btanalyzers
+import backtrader.feeds as btfeeds
+import time
+from operator import length_hint
+import json
+
+import pandas as pd
+from tqdm.auto import tqdm
+
+#Include Database connection details
+import connections
+
+gc.set_debug(True)
+#gc.set_threshold(100000, 100000, 100000)
+
+cur, conn = connections.get_postgresql()
+
+# Get Remaining Ticker Count
+remainingSymbolCount = 999
+DBstratID = 86
+timeframe = "15Min"          # 5Min, 15Min, Hour
+version = 0.7
+#while remainingSymbolCount != 0:
+
+print("Start Loop")
+
+cur = conn.cursor()
+cur.execute("select symbol from symbols except select distinct(ticker) as symbol from tickerautomation where stratid = %s and timeframe = %s and status in ('Started', 'Processing', 'Completed') order by symbol asc LIMIT 5;", [DBstratID, timeframe])
+remainingSymbols = cur.fetchall()
+
+remainingSymbolCount = length_hint(remainingSymbols)
+#print(remainingSymbolCount)
+
+cur.execute("select symbol from symbols except select distinct(ticker) as symbol from tickerautomation where stratid = %s and timeframe = %s and status in ('Started', 'Processing', 'Completed') order by symbol asc LIMIT 5;", [DBstratID, timeframe])
+tickerTuple = cur.fetchone()
+ticker = str(tickerTuple[0])
+cur.close()
+
+cur = conn.cursor()
+cur.execute("select count(ticker) from tickerautomation WHERE ticker = %s;", [ticker])
+stopTuple = cur.fetchone()
+#print(stopTuple[0])
+
+if stopTuple[0] != 0:
+    cur.execute("""UPDATE tickerautomation SET status = 'Processing', pendingcommand = null, timestamp = now() WHERE ticker = %s;""", [ticker])
+    conn.commit()
+else:
+    cur.execute("""INSERT INTO tickerautomation (ticker, stratid, status, timeframe) VALUES (%s, %s, %s, %s);""", (ticker, DBstratID, 'Processing', timeframe))
+    conn.commit()
+
+cur.close()
+
+
+# ticker override for debugging
+ticker = 'XLF'
+print(ticker)
+
+#Set Default Values
+startvalue = 10000.0
+startdate = "2016-01-01"  # "2016-01-01"
+enddate = "2024-01-01"    # "2024-01-01"
+notes = "Price Action V1"
+
+
+
+if timeframe == "5Min":
+    bars = pd.read_csv('./TickerPrices/5Min/'+ticker+'.csv', parse_dates=True, index_col="timestamp", dtype={'close': 'float32', 'high': 'float32', 'low': 'float32', 'trade_count': 'Int64', 'open': 'float32', 'volume': 'float32', 'vwap': 'float32',})
+elif timeframe == "15Min":
+    bars = pd.read_csv('./TickerPrices/15Min/'+ticker+'.csv', parse_dates=True, index_col="timestamp", dtype={'close': 'float32', 'high': 'float32', 'low': 'float32', 'trade_count': 'Int64', 'open': 'float32', 'volume': 'float32', 'vwap': 'float32',})
+elif timeframe == "Hour":
+    bars = pd.read_csv('./TickerPrices/Hour/'+ticker+'.csv', parse_dates=True, index_col="timestamp", dtype={'close': 'float32', 'high': 'float32', 'low': 'float32', 'trade_count': 'Int64', 'open': 'float32', 'volume': 'float32', 'vwap': 'float32',})
+else:
+    print('Invalid Timeframe or Ticker Symbol Value - Valid timeframe inputs = 5Min, 15Min, Hour')
+#bars = bars.filter(like='2022', axis=0)
+#bars
+
+totalBars = 97890
+totalBars = len(bars.axes[0])
+
+
+
+del pd
+#gc.collect()
+
+
+variations = []
+trailpercentValues = [0.8]
+#trailamountValues = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
+timeFramesOptions = [-1, -2, -3, -4, -5, -6, -7, -8, -9, -10]  # Always Negative Numbers to look backwards #timeFramesOptions = [-1, -2, -3, -4, -5, -6, -7, -8, -9, -10]
+cutOffHours1 = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22]  # cutOffHours1 = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24]
+cutOffHours2 = [5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24]
+trailDollarValues = [0]
+percCashValues = [.9]
+DayTradeProtectionValues = [False]
+commission = False
+saveToDB = True
+
+for trailpercent in trailpercentValues:
+    for traildollar in trailDollarValues:
+        for DayTradeProtection in DayTradeProtectionValues:
+            for cutOffHour1 in cutOffHours1:
+                for cutOffHour2 in cutOffHours2:
+                    for timeFrames in timeFramesOptions:
+                        for percCash in percCashValues:
+                            parameters = {"timeFrames": timeFrames, "cutOffHour1": cutOffHour1, "cutOffHour2": cutOffHour2, "trailpercent": trailpercent, "traildollar": traildollar, "DayTradeProtection": DayTradeProtection, "percCash": percCash}
+                            #print(parameters)
+                            if cutOffHour1 < cutOffHour2:
+                                variations.append(parameters)
+#print(variations)
+del parameters
+del trailpercentValues
+del trailDollarValues
+del DayTradeProtectionValues
+del cutOffHours1
+del cutOffHours2
+del timeFramesOptions
+del percCashValues
+#gc.collect()
+
+#For Debugging to skip existing duplicates
+#variations = variations[910:999]
+
+#processst = time.time()
+#processCount = 0
+#processTotal = len(variations)
+
+for parameters in variations:
+    cur, conn = connections.get_postgresql()
+    cur.execute("select count(pendingcommand) from tickerautomation WHERE stratid = %s and ticker = %s and pendingcommand IN ('StopResume', 'Stop');", [DBstratID, ticker])
+    finishTuple = cur.fetchone()
+    finishControl = int(finishTuple[0])
+    cur.close()
+    #print("FinishControl = "+str(finishControl))
+
+    if int(finishControl) != 0:
+        cur = conn.cursor()
+        if finishControl == 'Stop':
+            cur.execute("""UPDATE tickerautomation SET status = 'Stopped', pendingcommand = NULL WHERE ticker = %s;""",
+                        [ticker])
+        elif finishControl == 'StopResume':
+            cur.execute("""UPDATE tickerautomation SET status = 'Resume', pendingcommand = NULL WHERE ticker = %s;""",
+                        [ticker])
+        conn.commit()
+        cur.close()
+        print("Process Stopped by tickerautomation.pendingcommand = Stop")
+
+        exit()
+
+    #cur.close()
+    del finishControl
+
+    #Check for pre existing iteration
+    cur, conn = connections.get_postgresql()
+    dbparameters = json.dumps(parameters)
+    cur.execute("select id from backtraderesults where stratid = %s and timeframe = %s and startdate = %s and enddate = %s and ticker = %s and parameters = %s", [DBstratID, timeframe, startdate, enddate, ticker, dbparameters])
+    dupiterations = cur.fetchall()
+    cur.close()
+    conn.close()
+
+    dupiterationsCount = length_hint(dupiterations)
+    #print("Duplicate Iteration = "+str(dupiterationsCount)+" - "+str(ticker)+" - "+str(processCount)+" - v"+str(version))
+
+    if int(dupiterationsCount) != 0:
+        tqdm.write("Duplicate Iteration Found."+" - "+str(ticker)+" - "+str(processCount)+" - v"+str(version))
+        processCount = processCount + 1
+        continue
+        #break
+
+    # Script Execution start time
+    #st = time.time()
+    #processCount = processCount + 1
+    pbar = tqdm(total=totalBars)
+
+    class Strategy(bt.Strategy):
+        #print("Strategy")
+
+        # list of parameters which are configurable for the strategy
+        params = dict(
+            transDate = datetime.now().date(),
+        )
+        #gc.collect()
+
+        def next(self):
+            #print("NEXT")
+            pbar.update(1)
+            if not self.position:  # not in the market
+                timeFrame = 0
+                while timeFrame > parameters["timeFrames"]:
+                    #print("WHILE")
+                    timeFrame -= 1
+                    if self.data.close[timeFrame] < self.data.open[timeFrame]:
+                        #print(f"{self.datas[0].datetime.datetime(0)} - {self.data.open[timeFrame]} - {self.data.close[timeFrame]} - False - Line 200")
+                        break
+                    else:
+                        #print(f"{self.datas[0].datetime.datetime(0)} - {self.data.open[timeFrame]} - {self.data.close[timeFrame]} - Buy {cerebro.broker.getcash()} - Line 203")
+                        if timeFrame == parameters["timeFrames"]:
+                            pcash = cerebro.broker.getcash() * parameters["percCash"]
+                            psize = int(pcash / self.data.close)
+
+                            # print(self.datas[0].datetime.datetime(0)) # datetime.datetime
+                            currentHour = self.datas[0].datetime.datetime(0).strftime("%H")
+
+                            if int(parameters["cutOffHour1"]) <= int(currentHour) <= int(
+                                    parameters["cutOffHour2"]) and self.p.transDate != self.data.datetime.datetime(
+                                    0).date():
+                                # if self.p.transDate != self.data.datetime.datetime(0).date():
+                                # print(f"{cutOffHour1} - {currentHour} - {cutOffHour2} = True")
+                                self.p.transDate = self.data.datetime.datetime(0).date()
+                                # print(f"{self.p.transDate} = {self.data.datetime.datetime(0).date()} - Buy")
+                                self.buy(size=psize)
+
+            if self.position and self.p.transDate != self.data.datetime.datetime(0).date() and self.data.close[0] < \
+                    self.data.open[0]:
+                # print(f"{self.p.transDate} = {self.data.datetime.datetime(0).date()} - Sell")
+                self.p.transDate = self.data.datetime.datetime(0).date()
+                self.close()
+            #gc.collect()
+
+    cerebro = bt.Cerebro()  # create a "Cerebro" engine instance
+    cerebro.broker.setcash(startvalue)
+
+    # Create a data feed
+    data = bt.feeds.PandasData(dataname=bars, name=ticker)
+
+    cerebro.adddata(data)  # Add the data feed
+
+    cerebro.addstrategy(Strategy)  # Add the trading strategy
+    # Add Alpaca Crypto Commission Taker = 0.25%'''
+    if commission:
+        cerebro.broker.setcommission(commission=0.0025, margin=None, mult=1.0, commtype=None, percabs=True, stocklike=True, interest=0.0, interest_long=False, leverage=1.0, automargin=False, name=None)
+        tqdm.write("Commission Enabled")
+
+    cerebro.addanalyzer(btanalyzers.SharpeRatio, _name = "sharpe")
+    cerebro.addanalyzer(btanalyzers.Transactions, _name = "trans")
+    cerebro.addanalyzer(btanalyzers.TradeAnalyzer, _name = "trades")
+    cerebro.addanalyzer(btanalyzers.VWR, _name = "vwr")  # VWR Analyzer
+    cerebro.addanalyzer(btanalyzers.AnnualReturn, _name = "annualreturn")
+
+    #cerebro.run()  # run it all
+    result = cerebro.run()
+
+    # get the execution time
+    #et = time.time()
+    #runtime = et - st
+    runtime = 10
+
+    tradesList = result[0].analyzers[1].get_analysis()
+    transactions = json.dumps(str(tradesList), indent=4)
+
+    trades = result[0].analyzers[2].get_analysis()
+    positionstotal = trades['total']['total']
+
+    pbar.close()
+
+    if positionstotal == 0:
+        print("No Positions this test. "+str(ticker)+" - "+str(processCount)+" - v"+str(version))
+        if saveToDB:
+            cur, conn = connections.get_postgresql()
+            cur.execute(""" INSERT INTO public.backtraderesults
+            (stratid, timeframe, startdate, enddate, ticker, parameters, valueadd, vwr, sharperatio, positionstotal, positionslong, positionsshort, pnlgrosstotal, positonswontotal, positonswonpnltotal, positionslosttotal, positionslostpnltotal, annualreturns, transactions, notes, runtime) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s); """,
+                                (DBstratID, timeframe, startdate, enddate, ticker, dbparameters, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, notes, runtime))
+            conn.commit()
+            cur.close()
+            conn.close()
+
+    if positionstotal >= 1:
+        pnlgrosstotal = trades['pnl']['gross']['total']
+        positonswontotal = trades['won']['total']
+        positonswonpnltotal = trades['won']['pnl']['total']
+        positionslosttotal = trades['lost']['total']
+        positionslostpnltotal = trades['lost']['pnl']['total']
+        positionslong = trades['long']['total']
+        positionsshort = trades['short']['total']
+
+        sharpe = list(result[0].analyzers[0].get_analysis().items())
+        sharpeRatio = sharpe[0][1]
+        #print(sharpeRatio)
+
+        #result[0].analyzers[4].print()
+        yearReturn = list(result[0].analyzers[4].get_analysis().items())
+        #print(type(result[0].analyzers[4].get_analysis().items()))
+
+        annualReturns = json.dumps(result[0].analyzers[4].get_analysis())
+        #print(yearReturns)
+
+        vwr = list(result[0].analyzers[3].get_analysis().items())
+        VWR = vwr[0][1]
+
+        valueadd = int(cerebro.broker.getvalue() - startvalue)
+        valueaddpercent = cerebro.broker.getvalue() / startvalue
+        endvalue = cerebro.broker.getvalue()
+
+        if saveToDB:
+            cur, conn = connections.get_postgresql()
+            cur.execute(""" INSERT INTO public.backtraderesults
+            (stratid, timeframe, startdate, enddate, ticker, parameters, valueadd, vwr, sharperatio, positionstotal, positionslong, positionsshort, pnlgrosstotal, positonswontotal, positonswonpnltotal, positionslosttotal, positionslostpnltotal, annualreturns, transactions, notes, runtime) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s); """,
+                                (DBstratID, timeframe, startdate, enddate, ticker, dbparameters, valueadd, VWR, sharpeRatio, positionstotal, positionslong, positionsshort, pnlgrosstotal, positonswontotal, positonswonpnltotal, positionslosttotal, positionslostpnltotal, annualReturns, transactions, notes, runtime))
+            conn.commit()
+            cur.close()
+            conn.close()
+
+        #print(str(processCount) + ' of ' + str(processTotal) + ' - ticker = ' + str(ticker) + ' - DBstratID = ' + str(
+        #    DBstratID) + ' - timeframe = ' + str(timeframe) + ' - v' + str(version))
+        print('Value Change:', format(valueadd, ".4f"), 'dollars')
+        print('Value % Change:', format(valueaddpercent, ".4f"), '%')
+        print(parameters)
+        print('trailpercent:', format(parameters["trailpercent"], ".4f"), 'trailpercent')
+        print('traildollar:', format(parameters["traildollar"], ".4f"), 'traildollar')
+        print('Trades: ' + str(positionstotal))
+        print('Execution time:', format(runtime, ".4f"), 'seconds\n')
+
+        if not saveToDB:
+            cerebro.plot(style="bar", barup = 'green')  # and plot it with a single command
+
+            for each in result[0].analyzers:
+                each.print()
+
+        #gc.collect()
+
+
+
+        print("Clearing Resources")
+        del cerebro, data, result, tradesList, trades, yearReturn, vwr, VWR
+        del positionstotal, positionslong, positionsshort, pnlgrosstotal, positonswontotal, positonswonpnltotal
+        del positionslosttotal, positionslostpnltotal, annualReturns, transactions, runtime, parameters
+        del cur, conn, Strategy
+        #gc.collect()
+        #cur.close()
+
+    #processet = time.time()
+    #processruntime = (processet - processst) / 60
+    #processruntimestr = str(processruntime)
+    #print('Iteration Total Time:'+processruntimestr+'minutes')
+
+    cur, conn = connections.get_postgresql()
+    cur.execute("""UPDATE tickerautomation SET status = 'Completed' WHERE ticker=%s AND stratid=%s AND status=%s AND timeframe=%s;""", (ticker, DBstratID, 'Processing', timeframe))
+    conn.commit()
+    #ur.close()
+    conn.close()
+
+
+
+print("Finished All Symbols")
+
